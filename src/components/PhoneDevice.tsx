@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { DeviceRole, RogerBeepType, AudioProfileType, AudioSettings } from '../types/intercom';
 import { audioEngine } from '../utils/audioEngine';
+import { p2pManager } from '../utils/p2pManager';
 
 interface PhoneDeviceProps {
   role: DeviceRole;
@@ -24,7 +25,6 @@ interface PhoneDeviceProps {
   isStandalone?: boolean;
   channel: number;
   onChannelChange?: (ch: number) => void;
-  // External transmission trigger (e.g. from simulator partner)
   isPartnerTransmitting?: boolean;
   partnerName?: string;
   onTransmitChange?: (isTransmitting: boolean, settings: AudioSettings) => void;
@@ -51,7 +51,6 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
   partnerName = 'Parceiro',
   onTransmitChange,
 }) => {
-  // Device audio settings
   const [settings, setSettings] = useState<AudioSettings>({
     volume: 0.9,
     micGain: 1.5,
@@ -61,7 +60,7 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
     rogerBeep: 'tactical',
     pttLocked: false,
     voxEnabled: false,
-    voxThreshold: 35,
+    voxThreshold: 30,
     voxDelayMs: 700,
     duckingEnabled: true,
     duckingLevel: 0.85,
@@ -70,38 +69,42 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
 
   const [isTransmitting, setIsTransmitting] = useState(false);
   const [isReceiving, setIsReceiving] = useState(false);
-  const [currentLevel, setCurrentLevel] = useState(0); // 0 - 100 for VU meter
-  const [micAudioSource, setMicAudioSource] = useState<'mic' | 'test1' | 'test2' | 'tone'>('test1');
+  const [currentLevel, setCurrentLevel] = useState(0);
+  const [micAudioSource, setMicAudioSource] = useState<'mic' | 'test1' | 'test2' | 'tone'>(
+    isStandalone ? 'mic' : 'test1'
+  );
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
   const [voxTripped, setVoxTripped] = useState(false);
   const [pttHoldTimer, setPttHoldTimer] = useState<number>(0);
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
+  const [micReady, setMicReady] = useState(false);
 
   const voxTimeoutRef = useRef<number | null>(null);
   const pttIntervalRef = useRef<number | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const partnerTxStateRef = useRef(isPartnerTransmitting);
 
+  // Check audio context status
+  useEffect(() => {
+    setAudioUnlocked(audioEngine.isAudioUnlocked());
+  }, []);
+
   // Synchronize incoming partner transmission (Receiving mode RX)
   useEffect(() => {
     if (isPartnerTransmitting && !isTransmitting) {
       setIsReceiving(true);
-      // Play Squelch Open burst on RX start
       if (settings.squelchEnabled) {
         audioEngine.playSquelch('open');
       }
-      // Apply Audio Ducking on receiver
       if (settings.duckingEnabled) {
         audioEngine.applyAudioDucking(true, settings.duckingLevel);
       }
     } else if (!isPartnerTransmitting && partnerTxStateRef.current) {
-      // Partner stopped transmitting
       setIsReceiving(false);
-      // Play Squelch Close + Roger Beep on receiver
       if (settings.squelchEnabled) {
         audioEngine.playSquelch('close');
       }
       audioEngine.playRogerBeep(settings.rogerBeep);
-      // Release ducking
       if (settings.duckingEnabled) {
         audioEngine.releaseAudioDucking(true, settings.duckingReleaseMs);
       }
@@ -121,7 +124,6 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
           const micVal = audioEngine.getMicLevel();
           setCurrentLevel(micVal);
 
-          // Handle VOX detection if VOX is enabled
           if (settings.voxEnabled) {
             if (micVal >= settings.voxThreshold) {
               setVoxTripped(true);
@@ -137,16 +139,13 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
             }
           }
         } else {
-          // Simulated voice wave modulation
           const simulatedVal = Math.min(95, Math.floor(40 + Math.sin(Date.now() / 90) * 35 + Math.random() * 20));
           setCurrentLevel(simulatedVal);
         }
       } else if (isReceiving) {
-        // Meter reacts to received voice
-        const rxVal = Math.min(92, Math.floor(45 + Math.cos(Date.now() / 110) * 30 + Math.random() * 15));
-        setCurrentLevel(rxVal);
+        const rxVal = audioEngine.getRxLevel();
+        setCurrentLevel(rxVal > 0 ? rxVal : Math.min(85, Math.floor(45 + Math.cos(Date.now() / 110) * 30)));
       } else {
-        // Idle noise floor
         setCurrentLevel((prev) => Math.max(0, prev - 8));
       }
 
@@ -165,7 +164,7 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
   useEffect(() => {
     if (!settings.voxEnabled || isTransmitting || isReceiving) return;
 
-    let intervalId = window.setInterval(() => {
+    const intervalId = window.setInterval(() => {
       if (micAudioSource === 'mic') {
         const level = audioEngine.getMicLevel();
         if (level >= settings.voxThreshold) {
@@ -177,31 +176,34 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
     return () => clearInterval(intervalId);
   }, [settings.voxEnabled, isTransmitting, isReceiving, micAudioSource, settings.voxThreshold]);
 
+  const handleUnlockMobileAudio = async () => {
+    const ok = await audioEngine.unlockMobileAudio();
+    if (ok) setAudioUnlocked(true);
+    const stream = await audioEngine.setupMicrophone();
+    if (stream) setMicReady(true);
+  };
+
   // START TRANSMITTING (TX)
-  const startTransmit = (isVoxTrigger = false) => {
-    if (isReceiving) return; // Half-duplex tactical priority
+  const startTransmit = async (isVoxTrigger = false) => {
+    if (isReceiving) return;
     if (isTransmitting) return;
 
-    audioEngine.init();
+    await handleUnlockMobileAudio();
     audioEngine.triggerHaptic('press');
 
-    // Squelch burst on PTT press
     if (settings.squelchEnabled) {
       audioEngine.playSquelch('open');
     }
 
-    // Audio Ducking on local media
     if (settings.duckingEnabled) {
       audioEngine.applyAudioDucking(true, settings.duckingLevel);
     }
 
-    // Apply mic filter profile
     audioEngine.updateMicProfile(settings.profile, settings.micGain);
 
     setIsTransmitting(true);
     setPttHoldTimer(0);
 
-    // Track PTT duration
     pttIntervalRef.current = window.setInterval(() => {
       setPttHoldTimer((t) => t + 1);
     }, 1000);
@@ -210,15 +212,15 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
       onTransmitChange(true, settings);
     }
 
-    // Play test phrase or tone if simulated source
-    if (micAudioSource === 'test1') {
-      audioEngine.playSimulatedVoice(`${deviceName} para rádio parceiro, mensagem de teste, câmbio.`, () => {
-        if (!settings.pttLocked && !isVoxTrigger) {
-          // Finished phrase
-        }
+    // Real microphone recording & audio chunk transmission
+    if (micAudioSource === 'mic') {
+      audioEngine.startVoiceRecording((chunkBase64) => {
+        p2pManager.transmitVoiceChunk(chunkBase64);
       });
+    } else if (micAudioSource === 'test1') {
+      audioEngine.playSimulatedVoice(`${deviceName} para rádio parceiro, mensagem de teste, câmbio.`);
     } else if (micAudioSource === 'test2') {
-      audioEngine.playSimulatedVoice(`Atenção equipe, canal ${channel} operacional e verificado. Câmbio.`, () => {});
+      audioEngine.playSimulatedVoice(`Atenção equipe, canal ${channel} operacional e verificado. Câmbio.`);
     } else if (micAudioSource === 'tone') {
       audioEngine.playTestTone(1000, 2.5);
     }
@@ -233,19 +235,22 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
       pttIntervalRef.current = null;
     }
 
+    // Stop real microphone recorder
+    if (micAudioSource === 'mic') {
+      audioEngine.stopVoiceRecording();
+    }
+
     setIsTransmitting(false);
     setPttHoldTimer(0);
     setVoxTripped(false);
 
     audioEngine.triggerHaptic('release');
 
-    // Squelch close + Roger Beep
     if (settings.squelchEnabled) {
       audioEngine.playSquelch('close');
     }
     audioEngine.playRogerBeep(settings.rogerBeep);
 
-    // Release Audio Ducking
     if (settings.duckingEnabled) {
       audioEngine.releaseAudioDucking(true, settings.duckingReleaseMs);
     }
@@ -255,11 +260,9 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
     }
   };
 
-  // PTT BUTTON HANDLERS
   const handlePttDown = (e: React.MouseEvent | React.TouchEvent) => {
     e.preventDefault();
     if (settings.pttLocked) {
-      // Toggle PTT off if it was locked
       setSettings((s) => ({ ...s, pttLocked: false }));
       stopTransmit();
       return;
@@ -269,7 +272,7 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
 
   const handlePttUp = (e: React.MouseEvent | React.TouchEvent) => {
     e.preventDefault();
-    if (settings.pttLocked) return; // Locked hands-free mode stays on
+    if (settings.pttLocked) return;
     stopTransmit();
   };
 
@@ -289,7 +292,7 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
 
   const handleSetupMic = async () => {
     setMicAudioSource('mic');
-    await audioEngine.setupMicrophone();
+    await handleUnlockMobileAudio();
   };
 
   const currentChannelInfo = CHANNELS.find((c) => c.id === channel) || CHANNELS[0];
@@ -298,9 +301,20 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
     <div className={`relative flex flex-col bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl p-4 sm:p-5 select-none transition-all ${
       isTransmitting ? 'ring-2 ring-red-500/50 border-red-500/40 shadow-red-950/20' : isReceiving ? 'ring-2 ring-emerald-500/50 border-emerald-500/40 shadow-emerald-950/20' : ''
     }`}>
-      {/* --- TOP HARDWARE ACCENTS: Antenna & Knobs --- */}
+      {/* --- MOBILE AUDIO UNLOCK BANNER (CRUCIAL FOR SMARTPHONES) --- */}
+      {!audioUnlocked && (
+        <button
+          type="button"
+          onClick={handleUnlockMobileAudio}
+          className="mb-3 w-full py-2 px-3 rounded-xl bg-amber-500/20 border border-amber-500/50 text-amber-300 text-xs font-semibold flex items-center justify-center gap-2 animate-pulse hover:bg-amber-500/30 transition-all"
+        >
+          <Volume2 className="w-4 h-4 text-amber-400" />
+          <span>Toque aqui para ativar áudio e microfone</span>
+        </button>
+      )}
+
+      {/* --- TOP HARDWARE ACCENTS: Antenna & Status LEDs --- */}
       <div className="flex items-center justify-between pb-3 border-b border-slate-800/80">
-        {/* Antenna stub */}
         <div className="flex items-center gap-2">
           <div className="w-4 h-6 bg-slate-800 border border-slate-700 rounded-t-sm flex items-center justify-center">
             <div className="w-1.5 h-full bg-slate-700"></div>
@@ -310,12 +324,11 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
               {deviceName}
             </div>
             <div className="text-[10px] text-slate-500">
-              {role === 'alfa' ? 'Base Primária' : role === 'bravo' ? 'Unidade Remota' : 'Canal P2P'}
+              {role === 'alfa' ? 'Base Primária' : role === 'bravo' ? 'Unidade Remota' : 'Canal P2P Ativo'}
             </div>
           </div>
         </div>
 
-        {/* Tactical status LEDs */}
         <div className="flex items-center gap-3">
           <div className="flex flex-col items-center">
             <div
@@ -357,10 +370,8 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
 
       {/* --- BACKLIT LCD DOT-MATRIX SCREEN --- */}
       <div className="mt-3 relative rounded-xl bg-amber-950/30 border-2 border-amber-900/40 p-3.5 shadow-inner overflow-hidden">
-        {/* LCD scanline & texture layer */}
         <div className="absolute inset-0 bg-gradient-to-b from-amber-500/[0.04] to-transparent pointer-events-none" />
 
-        {/* Top LCD Row: Channel / CTCSS / Battery */}
         <div className="flex items-center justify-between font-mono text-[11px] text-amber-400/90 tracking-wide pb-1.5 border-b border-amber-900/30">
           <div className="flex items-center gap-1.5 font-bold">
             <Radio className="w-3.5 h-3.5 text-amber-400" />
@@ -369,25 +380,23 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
             <span className="text-[10px] text-amber-500/80">CTCSS {currentChannelInfo.subtone}</span>
           </div>
           <div className="flex items-center gap-2 text-[10px]">
-            <span className="text-amber-400/80">RSSI: -58dBm</span>
+            <span className="text-amber-400/80">P2P: OPUS HQ</span>
             <span>BAT 98%</span>
           </div>
         </div>
 
-        {/* Middle LCD Row: Frequency & Main Status Banner */}
         <div className="my-2.5 flex items-baseline justify-between">
           <div>
             <div className="font-mono text-xl sm:text-2xl font-bold tracking-tight text-amber-300">
               {currentChannelInfo.freq}
             </div>
             <div className="text-[10px] font-mono uppercase text-amber-400/70 mt-0.5 flex items-center gap-1.5">
-              <span>Modo: {settings.profile === 'hq_clean' ? 'HQ Cristalino' : settings.profile === 'boost_amplified' ? 'Voz Amplificada +12dB' : 'Filtro Walkie Tático'}</span>
+              <span>{settings.profile === 'hq_clean' ? 'HQ Cristalino' : settings.profile === 'boost_amplified' ? 'Voz Amplificada' : 'Filtro Walkie'}</span>
               <span>·</span>
               <span>{settings.rogerBeep !== 'none' ? `Beep: ${settings.rogerBeep}` : 'Sem Beep'}</span>
             </div>
           </div>
 
-          {/* Active status indicator badge */}
           <div className="text-right">
             {isTransmitting ? (
               <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-red-950/80 border border-red-600/70 text-red-400 rounded text-xs font-mono font-bold animate-pulse">
@@ -407,15 +416,14 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
           </div>
         </div>
 
-        {/* Audio Ducking Indicator inside LCD */}
         {settings.duckingEnabled && (
           <div className="flex items-center justify-between text-[10px] font-mono text-amber-400/75 py-1 border-t border-amber-900/30">
             <span className="flex items-center gap-1">
               <Zap className="w-3 h-3 text-amber-400" />
-              Ducking Ativo ({Math.round(settings.duckingLevel * 100)}% Atenuação)
+              Ducking ({Math.round(settings.duckingLevel * 100)}% Atenuação)
             </span>
             <span className={isTransmitting || isReceiving ? 'text-red-400 font-bold' : 'text-amber-500/60'}>
-              {isTransmitting || isReceiving ? 'MÍDIA ATENUADA' : 'Mídia Normal'}
+              {isTransmitting || isReceiving ? 'MÍDIA REBAIXADA' : 'Mídia Normal'}
             </span>
           </div>
         )}
@@ -423,15 +431,13 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
         {/* LED VU METER DISPLAY */}
         <div className="mt-2 pt-2 border-t border-amber-900/30">
           <div className="flex items-center justify-between text-[9px] font-mono text-amber-400/60 mb-1">
-            <span>VU METER (NÍVEL DE ÁUDIO)</span>
+            <span>VU METER (NÍVEL DE VOZ)</span>
             <span>{currentLevel > 0 ? `${currentLevel}%` : '0dB'}</span>
           </div>
-          {/* Multi-segment LED bar */}
           <div className="grid grid-cols-20 gap-0.5 h-3 bg-amber-950/60 p-0.5 rounded border border-amber-900/50">
             {Array.from({ length: 20 }).map((_, idx) => {
-              const segmentThreshold = (idx + 1) * 5; // 5%, 10% ... 100%
+              const segmentThreshold = (idx + 1) * 5;
               const isActive = currentLevel >= segmentThreshold;
-              // Color spectrum: 1-14 Green, 15-17 Amber, 18-20 Red
               let barColor = 'bg-slate-800/60';
               if (isActive) {
                 if (idx < 14) barColor = 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]';
@@ -464,9 +470,7 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
 
       {/* --- TACTICAL PUSH-TO-TALK BUTTON SECTION --- */}
       <div className="my-4 flex flex-col items-center">
-        {/* Giant PTT Button */}
         <div className="relative w-full max-w-[280px]">
-          {/* Pulse ring when active */}
           {isTransmitting && (
             <div className="absolute inset-0 rounded-2xl bg-red-500/20 animate-ping pointer-events-none" />
           )}
@@ -502,9 +506,7 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
           </button>
         </div>
 
-        {/* Dual Primary Hand-free & VOX Quick Toggles */}
         <div className="w-full grid grid-cols-2 gap-2 mt-3">
-          {/* PTT Lock Toggle */}
           <button
             type="button"
             onClick={togglePttLock}
@@ -518,7 +520,6 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
             <span>{settings.pttLocked ? 'PTT Lock: ATIVO' : 'Trava PTT (Lock)'}</span>
           </button>
 
-          {/* VOX Voice Activation Toggle */}
           <button
             type="button"
             onClick={() => setSettings((s) => ({ ...s, voxEnabled: !s.voxEnabled }))}
@@ -539,10 +540,10 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
         <div className="flex items-center justify-between text-slate-400 mb-2">
           <span className="font-medium text-slate-300 flex items-center gap-1.5">
             <Mic className="w-3.5 h-3.5 text-amber-400" />
-            Fonte do Áudio (Simulador/Real):
+            Fonte do Áudio:
           </span>
-          {micAudioSource === 'mic' && (
-            <span className="text-[10px] text-emerald-400">Mic Conectado</span>
+          {micReady && (
+            <span className="text-[10px] text-emerald-400">Microfone Real Pronto</span>
           )}
         </div>
 
@@ -610,7 +611,6 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
 
         {showSettingsDrawer && (
           <div className="mt-2 p-3 bg-slate-950/80 rounded-xl border border-slate-800 space-y-3.5 text-xs text-slate-300">
-            {/* Audio Profile: HQ Clean vs Tactical Walkie vs Boost */}
             <div>
               <label className="block text-slate-400 text-[11px] font-medium mb-1">
                 Perfil de Áudio (Qualidade e Filtros):
@@ -640,7 +640,6 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
               </div>
             </div>
 
-            {/* VOX Sensitivity Slider */}
             <div>
               <div className="flex items-center justify-between text-[11px] mb-1">
                 <span className="text-slate-400 font-medium">Sensibilidade VOX (Limiar):</span>
@@ -660,7 +659,6 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
               </div>
             </div>
 
-            {/* Squelch and Roger Beep Options */}
             <div className="grid grid-cols-2 gap-2 pt-1 border-t border-slate-800/80">
               <div>
                 <label className="block text-slate-400 text-[11px] mb-1">Som de Abertura (Squelch):</label>
@@ -699,7 +697,6 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
               </div>
             </div>
 
-            {/* Audio Ducking Controls */}
             <div className="pt-1 border-t border-slate-800/80">
               <div className="flex items-center justify-between mb-1 text-[11px]">
                 <span className="text-slate-400 font-medium">Atenuação Inteligente (Ducking):</span>
@@ -727,9 +724,6 @@ export const PhoneDevice: React.FC<PhoneDeviceProps> = ({
                   {Math.round(settings.duckingLevel * 100)}%
                 </span>
               </div>
-              <p className="text-[10px] text-slate-500 mt-1">
-                Reduz automaticamente música e sons secundários quando a voz estiver falando.
-              </p>
             </div>
           </div>
         )}

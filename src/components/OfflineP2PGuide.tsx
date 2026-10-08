@@ -1,5 +1,5 @@
 import React from 'react';
-import { Wifi, Radio, Shield, Zap, Lock, Mic, ArrowRightLeft, Smartphone, CheckCircle } from 'lucide-react';
+import { Wifi, Radio, Shield, Zap, Lock, Mic, ArrowRightLeft, Smartphone, CheckCircle, Volume2, ShieldCheck, Activity } from 'lucide-react';
 
 export const OfflineP2PGuide: React.FC = () => {
   return (
@@ -11,23 +11,84 @@ export const OfflineP2PGuide: React.FC = () => {
           </div>
           <div>
             <h2 className="text-lg font-bold text-slate-100">
-              Guia de Comunicação Offline & Ponto-a-Ponto (P2P)
+              Protocolo de Comunicação & Solução de Conexão Entre Celulares
             </h2>
             <p className="text-xs text-slate-400">
-              Como parear dois celulares reais sem internet ou operadora de telefonia
+              Arquitetura de baixa latência WebRTC + WebSocket Relay com áudio Opus
             </p>
           </div>
         </div>
 
         <p className="text-xs text-slate-300 leading-relaxed">
-          O Intercomunicador Offline foi projetado para operações onde a rede de celular (4G/5G) é inexistente ou instável. 
-          Ele utiliza protocolos ponto-a-ponto de baixíssima latência (WebRTC Local + BroadcastChannel + WebSocket LAN) para troca direta de áudio entre os aparelhos.
+          Para garantir que dois celulares consigam trocar áudios reais em qualquer rede (Wi-Fi, 4G, 5G ou roteador local), o aplicativo utiliza uma <strong>arquitetura híbrida de 3 camadas</strong> com redundância automática:
         </p>
+
+        {/* Protocol Layers Architecture */}
+        <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800 space-y-1.5">
+            <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold uppercase">
+              <Activity className="w-4 h-4" />
+              1. WebRTC Opus (P2P)
+            </div>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Comunicação direta ponto-a-ponto entre os dois celulares com codec Opus de alta fidelidade e latência sub-50ms via servidores STUN do Google.
+            </p>
+          </div>
+
+          <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800 space-y-1.5">
+            <div className="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase">
+              <Zap className="w-4 h-4" />
+              2. WebSocket Chunk Relay
+            </div>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Caso as operadoras de celular utilizem CGNAT ou bloqueiem tráfego UDP direto, o servidor transmite fatias contínuas de voz gravadas em tempo real.
+            </p>
+          </div>
+
+          <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800 space-y-1.5">
+            <div className="flex items-center gap-2 text-cyan-400 text-xs font-bold uppercase">
+              <Radio className="w-4 h-4" />
+              3. BroadcastChannel Local
+            </div>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Funciona 100% offline no mesmo dispositivo ou navegador para testes imediatos entre abas sem depender de internet ou servidor.
+            </p>
+          </div>
+        </div>
+
+        {/* Why audio didn't play & how it's solved */}
+        <div className="mt-6 p-4 bg-amber-950/30 border border-amber-900/50 rounded-2xl space-y-3">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
+            <Volume2 className="w-4 h-4" />
+            Por que o áudio pode não ter saído no outro celular e como foi resolvido:
+          </h3>
+
+          <ul className="space-y-2 text-xs text-slate-300">
+            <li className="flex items-start gap-2">
+              <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <span>
+                <strong className="text-slate-100">Política de Autoplay de Celulares (iOS/Android):</strong> Navegadores móveis bloqueiam áudio automático até que o usuário toque na tela. Adicionamos um botão de destaque <em>"Toque para ativar áudio e microfone"</em> e o botão <em>"Testar Alto-Falante"</em> para desbloquear a saída de som imediatamente.
+              </span>
+            </li>
+            <li className="flex items-start gap-2">
+              <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <span>
+                <strong className="text-slate-100">Permissão de Microfone:</strong> O microfone agora é solicitado automaticamente com captura de alta qualidade, cancelamento de eco e supressão de ruído ativo.
+              </span>
+            </li>
+            <li className="flex items-start gap-2">
+              <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <span>
+                <strong className="text-slate-100">Transmissão em Chunks Ativa:</strong> Enquanto você segura o botão PTT, o aplicativo grava e envia a voz continuamente (chunks a cada 300ms) tocando instantaneamente no alto-falante do parceiro com som de abertura (Squelch) e finalizador (Roger Beep).
+              </span>
+            </li>
+          </ul>
+        </div>
 
         {/* Step-by-step pairing guide */}
         <div className="mt-6 space-y-3">
           <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400">
-            Passo a Passo para Conectar 2 Celulares Físicos:
+            Passo a Passo Rápido:
           </h3>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -36,10 +97,10 @@ export const OfflineP2PGuide: React.FC = () => {
                 1
               </div>
               <h4 className="text-xs font-semibold text-slate-200 mb-1">
-                Conecte à Mesma Rede
+                Abra o Link nos 2 Celulares
               </h4>
               <p className="text-[11px] text-slate-400 leading-relaxed">
-                Ligue o <strong>Roteador Wi-Fi portátil</strong> ou ative o <strong>Ponto de Acesso (Hotspot)</strong> em um dos celulares e conecte o segundo celular nele (não precisa ter pacote de dados!).
+                No primeiro celular, clique em <strong>Parear</strong> e aponte a câmera do segundo celular para escanear o QR Code (ou entre com o mesmo PIN, ex: <strong>#7392</strong>).
               </p>
             </div>
 
@@ -48,10 +109,10 @@ export const OfflineP2PGuide: React.FC = () => {
                 2
               </div>
               <h4 className="text-xs font-semibold text-slate-200 mb-1">
-                Abra o Intercomunicador
+                Toque em "Ativar Áudio"
               </h4>
               <p className="text-[11px] text-slate-400 leading-relaxed">
-                Abra o app nos dois celulares. Clique no botão <strong>Parear</strong> e aponte a câmera do segundo celular para o QR Code gerado pelo primeiro.
+                Nos dois aparelhos, toque no botão para autorizar o microfone e desbloquear o alto-falante do celular.
               </p>
             </div>
 
@@ -60,56 +121,13 @@ export const OfflineP2PGuide: React.FC = () => {
                 3
               </div>
               <h4 className="text-xs font-semibold text-slate-200 mb-1">
-                Pronto para Falar!
+                Aperte o PTT e Fale!
               </h4>
               <p className="text-[11px] text-slate-400 leading-relaxed">
-                Aperte o <strong>PTT</strong> ou use <strong>PTT Lock / VOX</strong> para conversar instantaneamente com áudio amplificado e ducking inteligente.
+                Segure o botão PTT e fale. O outro celular receberá sua voz instantaneamente em alto e bom som!
               </p>
             </div>
           </div>
-        </div>
-      </div>
-
-      {/* Feature Deep Dive */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl space-y-2">
-          <div className="flex items-center gap-2 text-amber-400 text-sm font-semibold">
-            <Lock className="w-4 h-4" />
-            Trava de PTT (PTT Lock)
-          </div>
-          <p className="text-xs text-slate-400 leading-relaxed">
-            Permite travar o microfone aberto com 1 toque sem precisar segurar o botão físico com o dedo. Essencial para quem está pilotando moto, pedalando ou usando luvas grossas de trabalho.
-          </p>
-        </div>
-
-        <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl space-y-2">
-          <div className="flex items-center gap-2 text-emerald-400 text-sm font-semibold">
-            <Mic className="w-4 h-4" />
-            Acionamento por Voz (VOX)
-          </div>
-          <p className="text-xs text-slate-400 leading-relaxed">
-            Detecta quando você começa a falar e aciona a transmissão sem nenhum toque na tela. Com delay ajustável, ele evita que o final das palavras seja cortado.
-          </p>
-        </div>
-
-        <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl space-y-2">
-          <div className="flex items-center gap-2 text-cyan-400 text-sm font-semibold">
-            <Zap className="w-4 h-4" />
-            Voz Limpa HQ & Modo Amplificado
-          </div>
-          <p className="text-xs text-slate-400 leading-relaxed">
-            Alterne entre o áudio cristalino de alta fidelidade ou o modo amplificado com compressor dinâmico (+12dB) e filtro tático passa-faixa para cortar ruídos de vento e trânsito.
-          </p>
-        </div>
-
-        <div className="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl space-y-2">
-          <div className="flex items-center gap-2 text-amber-400 text-sm font-semibold">
-            <Radio className="w-4 h-4" />
-            Squelch e Roger Beeps
-          </div>
-          <p className="text-xs text-slate-400 leading-relaxed">
-            O som de corte de portadora (Squelch) garante que você saiba exatamente quando o canal foi aberto, e o Roger Beep avisa ao parceiro que você terminou a frase.
-          </p>
         </div>
       </div>
     </div>

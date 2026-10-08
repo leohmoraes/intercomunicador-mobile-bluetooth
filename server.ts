@@ -12,19 +12,48 @@ async function startServer() {
   const app = express();
   const server = createServer(app);
 
-  app.use(express.json());
+  app.use(express.json({ limit: '15mb' }));
 
   // WebSocket signaling server for P2P Intercom pairing
   const wss = new WebSocketServer({ server, path: '/ws' });
 
   interface PeerClient {
-    ws: WebSocket;
+    ws?: WebSocket;
     roomId: string;
     peerId: string;
     deviceName: string;
+    lastSeen: number;
   }
 
-  const clients = new Map<WebSocket, PeerClient>();
+  const clients = new Map<string, PeerClient>(); // key: peerId
+  const wsToPeerId = new Map<WebSocket, string>();
+  
+  // Message queue for HTTP polling fallback
+  const messageQueues = new Map<string, Array<Record<string, unknown>>>(); // key: peerId
+
+  const queueMessageForPeer = (targetPeerId: string, msg: Record<string, unknown>) => {
+    if (!messageQueues.has(targetPeerId)) {
+      messageQueues.set(targetPeerId, []);
+    }
+    const q = messageQueues.get(targetPeerId)!;
+    q.push(msg);
+    if (q.length > 50) q.shift(); // keep last 50
+  };
+
+  const broadcastToRoom = (senderPeerId: string, roomId: string, msg: Record<string, unknown>, targetPeerId?: string) => {
+    for (const [peerId, client] of clients.entries()) {
+      if (peerId !== senderPeerId && client.roomId === roomId) {
+        if (!targetPeerId || targetPeerId === peerId) {
+          // Send via WebSocket if open
+          if (client.ws && client.ws.readyState === WebSocket.OPEN) {
+            client.ws.send(JSON.stringify(msg));
+          }
+          // Also buffer in queue for HTTP polling peers
+          queueMessageForPeer(peerId, msg);
+        }
+      }
+    }
+  };
 
   wss.on('connection', (ws) => {
     ws.on('message', (data) => {
@@ -32,66 +61,127 @@ async function startServer() {
         const msg = JSON.parse(data.toString());
         
         if (msg.type === 'join') {
-          clients.set(ws, {
-            ws,
-            roomId: msg.roomId || 'global-ch1',
-            peerId: msg.peerId,
-            deviceName: msg.deviceName || 'Intercom Device',
-          });
+          const peerId = msg.peerId;
+          const roomId = msg.roomId || '7392';
+          const deviceName = msg.deviceName || 'Celular Remoto';
 
-          // Notify others in room
-          const currentClient = clients.get(ws)!;
-          for (const [otherWs, client] of clients.entries()) {
-            if (otherWs !== ws && client.roomId === currentClient.roomId && otherWs.readyState === WebSocket.OPEN) {
-              // Notify existing peer of new peer
-              otherWs.send(JSON.stringify({
-                type: 'peer-joined',
-                peerId: currentClient.peerId,
-                deviceName: currentClient.deviceName,
-              }));
-              // Notify new peer of existing peer
+          clients.set(peerId, {
+            ws,
+            roomId,
+            peerId,
+            deviceName,
+            lastSeen: Date.now(),
+          });
+          wsToPeerId.set(ws, peerId);
+
+          // Tell the joining peer about all existing peers in the room
+          for (const [otherId, client] of clients.entries()) {
+            if (otherId !== peerId && client.roomId === roomId) {
               ws.send(JSON.stringify({
                 type: 'peer-joined',
-                peerId: client.peerId,
+                peerId: otherId,
                 deviceName: client.deviceName,
+                roomId,
               }));
-            }
-          }
-        } else if (msg.type === 'signal' || msg.type === 'voice-chunk' || msg.type === 'ptt-state') {
-          // Forward signaling or voice payload to peers in same room
-          const sender = clients.get(ws);
-          if (!sender) return;
 
-          for (const [otherWs, client] of clients.entries()) {
-            if (otherWs !== ws && client.roomId === sender.roomId && otherWs.readyState === WebSocket.OPEN) {
-              if (!msg.targetPeerId || msg.targetPeerId === client.peerId) {
-                otherWs.send(JSON.stringify({
-                  ...msg,
-                  fromPeerId: sender.peerId,
+              // Notify the other peer of the new peer
+              if (client.ws && client.ws.readyState === WebSocket.OPEN) {
+                client.ws.send(JSON.stringify({
+                  type: 'peer-joined',
+                  peerId,
+                  deviceName,
+                  roomId,
                 }));
               }
             }
           }
+        } else if (msg.type === 'signal' || msg.type === 'voice-data' || msg.type === 'voice-start' || msg.type === 'voice-stop' || msg.type === 'ping' || msg.type === 'pong') {
+          const senderId = msg.senderId || wsToPeerId.get(ws);
+          if (!senderId) return;
+          const sender = clients.get(senderId);
+          const roomId = sender ? sender.roomId : (msg.roomId || '7392');
+
+          broadcastToRoom(senderId, roomId, { ...msg, fromPeerId: senderId }, msg.targetPeerId);
         }
       } catch (err) {
-        console.error('Error parsing WS message:', err);
+        console.error('Error handling WebSocket message:', err);
       }
     });
 
     ws.on('close', () => {
-      const sender = clients.get(ws);
-      if (sender) {
-        clients.delete(ws);
-        for (const [otherWs, client] of clients.entries()) {
-          if (client.roomId === sender.roomId && otherWs.readyState === WebSocket.OPEN) {
-            otherWs.send(JSON.stringify({
-              type: 'peer-left',
-              peerId: sender.peerId,
-            }));
-          }
+      const peerId = wsToPeerId.get(ws);
+      if (peerId) {
+        const client = clients.get(peerId);
+        if (client) {
+          broadcastToRoom(peerId, client.roomId, {
+            type: 'peer-left',
+            peerId,
+          });
+          clients.delete(peerId);
         }
+        wsToPeerId.delete(ws);
+        messageQueues.delete(peerId);
       }
     });
+  });
+
+  // --- HTTP SIGNALING FALLBACK ENDPOINTS ---
+  app.post('/api/signaling/join', (req, res) => {
+    const { peerId, roomId, deviceName } = req.body;
+    if (!peerId || !roomId) {
+      return res.status(400).json({ error: 'Missing peerId or roomId' });
+    }
+
+    const existing = clients.get(peerId);
+    clients.set(peerId, {
+      ws: existing?.ws,
+      roomId,
+      peerId,
+      deviceName: deviceName || 'Celular Remoto',
+      lastSeen: Date.now(),
+    });
+
+    // Notify room peers
+    broadcastToRoom(peerId, roomId, {
+      type: 'peer-joined',
+      peerId,
+      deviceName: deviceName || 'Celular Remoto',
+      roomId,
+    });
+
+    // Return list of peers already in room
+    const peersInRoom: Array<{ peerId: string; deviceName: string }> = [];
+    for (const [otherId, client] of clients.entries()) {
+      if (otherId !== peerId && client.roomId === roomId) {
+        peersInRoom.push({ peerId: otherId, deviceName: client.deviceName });
+      }
+    }
+
+    res.json({ status: 'ok', peers: peersInRoom });
+  });
+
+  app.post('/api/signaling/send', (req, res) => {
+    const { senderId, roomId, targetPeerId, payload } = req.body;
+    if (!senderId || !roomId || !payload) {
+      return res.status(400).json({ error: 'Invalid parameters' });
+    }
+
+    broadcastToRoom(senderId, roomId, { ...payload, fromPeerId: senderId }, targetPeerId);
+    res.json({ status: 'sent' });
+  });
+
+  app.get('/api/signaling/poll', (req, res) => {
+    const peerId = req.query.peerId as string;
+    if (!peerId) return res.status(400).json({ error: 'Missing peerId' });
+
+    const q = messageQueues.get(peerId) || [];
+    messageQueues.set(peerId, []); // drain queue
+
+    // Update last seen
+    const client = clients.get(peerId);
+    if (client) client.lastSeen = Date.now();
+
+    res.json({ messages: q });
   });
 
   // Health check endpoint

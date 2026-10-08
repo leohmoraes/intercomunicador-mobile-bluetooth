@@ -4,6 +4,7 @@ class AudioEngine {
   private ctx: AudioContext | null = null;
   private bgGainNode: GainNode | null = null;
   private masterGainNode: GainNode | null = null;
+  private rxGainNode: GainNode | null = null;
   private isBgMusicPlaying = false;
   private bgTimer: number | null = null;
   private micStream: MediaStream | null = null;
@@ -16,8 +17,11 @@ class AudioEngine {
   private rxAnalyser: AnalyserNode | null = null;
   private duckingTimeout: number | null = null;
   private isDucked = false;
+  private mediaRecorder: MediaRecorder | null = null;
+  private recordedChunks: Blob[] = [];
+  private isUnlocked = false;
 
-  public init() {
+  public init(): AudioContext {
     if (!this.ctx) {
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AudioCtx();
@@ -26,6 +30,11 @@ class AudioEngine {
       this.masterGainNode = this.ctx.createGain();
       this.masterGainNode.gain.setValueAtTime(1.0, this.ctx.currentTime);
       this.masterGainNode.connect(this.ctx.destination);
+
+      // RX Voice Output gain
+      this.rxGainNode = this.ctx.createGain();
+      this.rxGainNode.gain.setValueAtTime(1.2, this.ctx.currentTime);
+      this.rxGainNode.connect(this.masterGainNode);
 
       // Background audio bus (for Ducking)
       this.bgGainNode = this.ctx.createGain();
@@ -36,7 +45,7 @@ class AudioEngine {
       this.rxAnalyser = this.ctx.createAnalyser();
       this.rxAnalyser.fftSize = 256;
       this.rxAnalyser.smoothingTimeConstant = 0.8;
-      this.rxAnalyser.connect(this.masterGainNode);
+      this.rxGainNode.connect(this.rxAnalyser);
     }
 
     if (this.ctx.state === 'suspended') {
@@ -44,6 +53,31 @@ class AudioEngine {
     }
 
     return this.ctx;
+  }
+
+  public async unlockMobileAudio(): Promise<boolean> {
+    const ctx = this.init();
+    try {
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+      // Play a short inaudible click to satisfy iOS Safari & Android Chrome autoplay restrictions
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.05);
+      this.isUnlocked = true;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public isAudioUnlocked(): boolean {
+    return this.isUnlocked && this.ctx?.state === 'running';
   }
 
   public getContext(): AudioContext {
@@ -56,7 +90,6 @@ class AudioEngine {
     const duration = type === 'open' ? 0.065 : 0.085;
     const now = ctx.currentTime;
 
-    // Generate white/pink noise buffer
     const bufferSize = Math.floor(ctx.sampleRate * duration);
     const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const output = noiseBuffer.getChannelData(0);
@@ -64,7 +97,6 @@ class AudioEngine {
 
     for (let i = 0; i < bufferSize; i++) {
       const white = Math.random() * 2 - 1;
-      // Pinkish noise filter approximation
       b0 = 0.99886 * b0 + white * 0.0555179;
       b1 = 0.99332 * b1 + white * 0.0750759;
       b2 = 0.96900 * b2 + white * 0.1538520;
@@ -74,13 +106,11 @@ class AudioEngine {
     const noiseSource = ctx.createBufferSource();
     noiseSource.buffer = noiseBuffer;
 
-    // Bandpass filter to sound like an authentic walkie-talkie receiver carrier burst
     const filter = ctx.createBiquadFilter();
     filter.type = 'bandpass';
     filter.frequency.setValueAtTime(type === 'open' ? 1800 : 1400, now);
     filter.Q.setValueAtTime(3.5, now);
 
-    // Sharp squelch envelope
     const env = ctx.createGain();
     env.gain.setValueAtTime(0.001, now);
     env.gain.linearRampToValueAtTime(0.4, now + 0.01);
@@ -93,7 +123,6 @@ class AudioEngine {
     noiseSource.start(now);
     noiseSource.stop(now + duration + 0.01);
 
-    // Add subtle mechanical sub-click
     const click = ctx.createOscillator();
     const clickGain = ctx.createGain();
     click.type = 'triangle';
@@ -116,7 +145,6 @@ class AudioEngine {
     const now = ctx.currentTime;
 
     if (type === 'quindar') {
-      // NASA Apollo Quindar Tone: 2524 Hz sine burst
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
@@ -132,7 +160,6 @@ class AudioEngine {
       osc.start(now);
       osc.stop(now + 0.23);
     } else if (type === 'tactical') {
-      // Dual-tone stepped military chirp: 1150 Hz then 1750 Hz
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
@@ -149,7 +176,6 @@ class AudioEngine {
       osc.start(now);
       osc.stop(now + 0.17);
     } else if (type === 'classic') {
-      // Standard 1000 Hz short radio beep
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
@@ -165,7 +191,6 @@ class AudioEngine {
       osc.start(now);
       osc.stop(now + 0.13);
     } else if (type === 'chirp') {
-      // Pitch ramp chirp 800 -> 2400 Hz
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'triangle';
@@ -184,8 +209,6 @@ class AudioEngine {
   }
 
   // --- AUDIO DUCKING SYSTEM ---
-  // When voice begins transmitting or receiving, background audio drops immediately.
-  // When voice finishes, volume gradually restores.
   public applyAudioDucking(duckingEnabled: boolean, duckingDepth: number = 0.85) {
     if (!duckingEnabled || !this.bgGainNode || !this.ctx) return;
     if (this.duckingTimeout) {
@@ -194,11 +217,10 @@ class AudioEngine {
     }
 
     const now = this.ctx.currentTime;
-    const targetGain = Math.max(0.01, 0.5 * (1 - duckingDepth)); // e.g. Drops to 15% or 5%
+    const targetGain = Math.max(0.01, 0.5 * (1 - duckingDepth));
 
     this.isDucked = true;
     this.bgGainNode.gain.cancelScheduledValues(now);
-    // Fast attack ducking (35ms)
     this.bgGainNode.gain.linearRampToValueAtTime(targetGain, now + 0.035);
   }
 
@@ -208,13 +230,11 @@ class AudioEngine {
       window.clearTimeout(this.duckingTimeout);
     }
 
-    // Small delay to ensure no voice tail cutoff before restoring
     this.duckingTimeout = window.setTimeout(() => {
       if (!this.ctx || !this.bgGainNode) return;
       const now = this.ctx.currentTime;
       this.isDucked = false;
       this.bgGainNode.gain.cancelScheduledValues(now);
-      // Smooth release curve back to baseline 0.5
       this.bgGainNode.gain.linearRampToValueAtTime(0.5, now + (releaseMs / 1000));
     }, 150);
   }
@@ -223,10 +243,8 @@ class AudioEngine {
     return this.isDucked;
   }
 
-  // --- BACKGROUND MUSIC & SPOTIFY SIMULATOR ---
-  // Generates pleasant ambient lo-fi chords so user can test the Audio Ducking effect immediately
+  // --- BACKGROUND MUSIC SIMULATOR ---
   public toggleBackgroundMusic(): boolean {
-    const ctx = this.getContext();
     if (this.isBgMusicPlaying) {
       this.stopBackgroundMusic();
       return false;
@@ -241,10 +259,9 @@ class AudioEngine {
   }
 
   private startBackgroundMusic() {
-    const ctx = this.getContext();
+    this.init();
     this.isBgMusicPlaying = true;
 
-    // Ambient procedural Lo-Fi chord player
     const chords = [
       [261.63, 329.63, 392.00, 493.88], // Cmaj7
       [220.00, 261.63, 329.63, 392.00], // Am7
@@ -311,7 +328,7 @@ class AudioEngine {
   // --- MICROPHONE INPUT & SIGNAL CHAIN ---
   public async setupMicrophone(): Promise<MediaStream | null> {
     try {
-      if (this.micStream) return this.micStream;
+      if (this.micStream && this.micStream.active) return this.micStream;
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -325,11 +342,9 @@ class AudioEngine {
 
       this.micSource = ctx.createMediaStreamSource(stream);
 
-      // Mic Gain / Boost
       this.micGain = ctx.createGain();
-      this.micGain.gain.setValueAtTime(1.0, ctx.currentTime);
+      this.micGain.gain.setValueAtTime(1.5, ctx.currentTime);
 
-      // Walkie-Talkie Filters (Highpass & Lowpass)
       this.micFilterHigh = ctx.createBiquadFilter();
       this.micFilterHigh.type = 'highpass';
       this.micFilterHigh.frequency.setValueAtTime(300, ctx.currentTime);
@@ -338,7 +353,6 @@ class AudioEngine {
       this.micFilterLow.type = 'lowpass';
       this.micFilterLow.frequency.setValueAtTime(3400, ctx.currentTime);
 
-      // Limiter / Compressor to avoid harsh clipping when boosted
       this.micCompressor = ctx.createDynamicsCompressor();
       this.micCompressor.threshold.setValueAtTime(-14, ctx.currentTime);
       this.micCompressor.knee.setValueAtTime(8, ctx.currentTime);
@@ -346,12 +360,10 @@ class AudioEngine {
       this.micCompressor.attack.setValueAtTime(0.005, ctx.currentTime);
       this.micCompressor.release.setValueAtTime(0.1, ctx.currentTime);
 
-      // Analyser for metering & VOX
       this.micAnalyser = ctx.createAnalyser();
       this.micAnalyser.fftSize = 256;
       this.micAnalyser.smoothingTimeConstant = 0.5;
 
-      // Connect graph: source -> gain -> compressor -> analyser
       this.micSource.connect(this.micGain);
       this.micGain.connect(this.micCompressor);
       this.micCompressor.connect(this.micAnalyser);
@@ -363,18 +375,20 @@ class AudioEngine {
     }
   }
 
+  public getMicStream(): MediaStream | null {
+    return this.micStream;
+  }
+
   public updateMicProfile(profile: AudioProfileType, gainMultiplier: number = 1.0) {
     if (!this.micGain || !this.ctx) return;
     const now = this.ctx.currentTime;
 
-    // Apply Boost gain
     let targetGain = gainMultiplier;
     if (profile === 'boost_amplified') {
-      targetGain = gainMultiplier * 2.5; // +8dB to +14dB boost
+      targetGain = gainMultiplier * 2.5;
     }
     this.micGain.gain.setTargetAtTime(targetGain, now, 0.05);
 
-    // Apply walkie bandpass if tactical profile
     if (this.micSource && this.micFilterHigh && this.micFilterLow && this.micCompressor) {
       try {
         this.micSource.disconnect();
@@ -383,13 +397,11 @@ class AudioEngine {
         this.micFilterLow.disconnect();
 
         if (profile === 'tactical_walkie') {
-          // Bandpass chain
           this.micSource.connect(this.micFilterHigh);
           this.micFilterHigh.connect(this.micFilterLow);
           this.micFilterLow.connect(this.micGain);
           this.micGain.connect(this.micCompressor);
         } else {
-          // Clean HQ chain
           this.micSource.connect(this.micGain);
           this.micGain.connect(this.micCompressor);
         }
@@ -399,7 +411,6 @@ class AudioEngine {
     }
   }
 
-  // Measure current microphone RMS level (0 - 100)
   public getMicLevel(): number {
     if (!this.micAnalyser) return 0;
     const data = new Uint8Array(this.micAnalyser.frequencyBinCount);
@@ -412,8 +423,97 @@ class AudioEngine {
     return Math.min(100, Math.round((avg / 128) * 100));
   }
 
+  public getRxLevel(): number {
+    if (!this.rxAnalyser) return 0;
+    const data = new Uint8Array(this.rxAnalyser.frequencyBinCount);
+    this.rxAnalyser.getByteFrequencyData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      sum += data[i];
+    }
+    const avg = sum / data.length;
+    return Math.min(100, Math.round((avg / 128) * 100));
+  }
+
+  // --- REAL-TIME VOICE RECORDING & STREAMING TO REMOTE PEER ---
+  public startVoiceRecording(onChunk: (base64Data: string) => void) {
+    if (!this.micStream) return;
+    try {
+      this.recordedChunks = [];
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+        ? 'audio/mp4'
+        : '';
+
+      const options = mimeType ? { mimeType } : undefined;
+      this.mediaRecorder = new MediaRecorder(this.micStream, options);
+
+      this.mediaRecorder.ondataavailable = async (e) => {
+        if (e.data && e.data.size > 0) {
+          this.recordedChunks.push(e.data);
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64 = (reader.result as string).split(',')[1];
+            if (base64) onChunk(base64);
+          };
+          reader.readAsDataURL(e.data);
+        }
+      };
+
+      // Slices every 300ms for continuous streaming
+      this.mediaRecorder.start(300);
+    } catch (err) {
+      console.error('Failed to start voice recorder:', err);
+    }
+  }
+
+  public stopVoiceRecording(onFinalChunk?: (base64Data: string) => void) {
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      try {
+        this.mediaRecorder.requestData();
+        this.mediaRecorder.stop();
+      } catch {
+        // Safe stop
+      }
+      this.mediaRecorder = null;
+    }
+  }
+
+  // --- PLAY RECEIVED AUDIO DATA ON SPEAKER ---
+  public async playReceivedAudioChunk(base64Data: string) {
+    try {
+      const ctx = this.getContext();
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+
+      // Convert base64 to ArrayBuffer
+      const binaryString = window.atob(base64Data);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0));
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+
+      source.connect(this.rxGainNode || this.masterGainNode || ctx.destination);
+      source.start();
+    } catch (err) {
+      console.warn('Could not decode audio chunk, trying audio element fallback:', err);
+      try {
+        const audio = new Audio(`data:audio/webm;base64,${base64Data}`);
+        audio.play().catch(() => {});
+      } catch {
+        // Safe ignore
+      }
+    }
+  }
+
   // --- SYNTHESIZED TEST TRANSMISSION TONE & VOICE ---
-  // Plays simulated voice or 1kHz test tone for instant testing without speaking aloud
   public playTestTone(frequency: number = 1000, durationSec: number = 1.0) {
     const ctx = this.getContext();
     const now = ctx.currentTime;
@@ -449,7 +549,6 @@ class AudioEngine {
       };
       window.speechSynthesis.speak(utterance);
     } else {
-      // Fallback: 3 pleasant radio tonal beeps
       this.playTestTone(880, 0.4);
       setTimeout(() => this.playTestTone(1100, 0.4), 450);
       setTimeout(() => {
@@ -458,7 +557,6 @@ class AudioEngine {
     }
   }
 
-  // Haptic feedback for tactical PTT sensation
   public triggerHaptic(type: 'press' | 'release' | 'roger') {
     if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
       try {
@@ -470,7 +568,7 @@ class AudioEngine {
           navigator.vibrate([20, 30, 20]);
         }
       } catch {
-        // Ignore vibration errors
+        // Safe
       }
     }
   }
