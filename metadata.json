@@ -1,0 +1,10 @@
+{
+  "name": "Intercomunicador Offline P2P",
+  "description": "Walkie-talkie P2P e intercomunicador offline para pareamento direto entre celulares com PTT Lock, VOX, Ducking de áudio inteligente e simulador duplo.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
